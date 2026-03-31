@@ -5,6 +5,7 @@
 // @description  One-click scan & download videos from Candfans creators you subscribe to. Zero external dependencies.
 // @author       candfans-downloader
 // @match        https://candfans.jp/*
+// @license      MIT
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
