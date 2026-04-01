@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Candfans Downloader
 // @namespace    https://github.com/candfans-downloader
-// @version      2.1.0
+// @version      2.1.1
 // @description  One-click scan & download videos from Candfans creators you subscribe to. Zero external dependencies.
 // @author       candfans-downloader
 // @match        https://candfans.jp/*
@@ -93,18 +93,27 @@
     .cfd-select-bar { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
     .cfd-select-bar span { font-size: 11px; color: #a6adc8; margin-left: auto; }
 
-    /* Single post download button */
+    /* Single post download button - inline with video controls */
     .cfd-post-dl-btn {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 6px 14px; border-radius: 8px; border: none;
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: #fff; font-size: 12px; font-weight: 600;
-      cursor: pointer; transition: opacity .15s;
-      margin: 8px 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 6px; border-radius: 50%; border: none;
+      background: rgba(99, 102, 241, 0.85);
+      color: #fff; cursor: pointer; transition: opacity .15s, background .15s;
+      aspect-square: 1;
     }
-    .cfd-post-dl-btn:hover { opacity: .85; }
+    .cfd-post-dl-btn:hover { background: rgba(139, 92, 246, 1); }
     .cfd-post-dl-btn:disabled { opacity: .4; cursor: not-allowed; }
-    .cfd-post-dl-btn svg { width: 14px; height: 14px; }
+    .cfd-post-dl-btn svg { width: 18px; height: 18px; }
+    /* Progress tooltip shown during download */
+    .cfd-post-dl-btn[data-status]:not([data-status=""]):after {
+      content: attr(data-status);
+      position: absolute; bottom: calc(100% + 6px); right: 0;
+      background: #1e1e2e; color: #cdd6f4;
+      padding: 4px 8px; border-radius: 6px; font-size: 11px;
+      white-space: nowrap; pointer-events: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+    .cfd-post-dl-btn { position: relative; }
   `;
 
   // ── State ──
@@ -353,22 +362,30 @@
 
   // ── Single Post Download ──
   function findM3U8FromPage() {
-    // Strategy 1: search page HTML for video.candfans.jp m3u8 URLs
-    const match = document.body.innerHTML.match(/https?:\/\/video\.candfans\.jp\/[^"'\s<>]+\.m3u8/);
-    if (match) return match[0];
+    const M3U8_RE = /https?:\/\/video\.candfans\.jp\/[^"'\s<>]+\.m3u8/g;
 
-    // Strategy 2: check video/source elements
-    const allSources = document.querySelectorAll('source[src*=".m3u8"], video[src*=".m3u8"]');
-    for (const el of allSources) {
-      const src = el.src || el.getAttribute('src');
-      if (src) return src;
+    // Strategy 1: Video.js player instance (most reliable - gets full video, not sample)
+    try {
+      const vjsEl = document.querySelector('video-js');
+      if (vjsEl && vjsEl.player) {
+        const src = vjsEl.player.currentSrc();
+        if (src && src.includes('.m3u8')) return src;
+      }
+    } catch (e) {}
+
+    // Strategy 2: search all script tags (Next.js data, inline scripts)
+    for (const script of document.querySelectorAll('script')) {
+      const matches = [...script.textContent.matchAll(M3U8_RE)];
+      // Prefer non-sample URLs
+      const full = matches.find(m => !m[0].includes('sample'));
+      if (full) return full[0];
+      if (matches.length) return matches[0][0];
     }
 
-    // Strategy 3: check data attributes on video elements
-    const videoEl = document.querySelector('video');
-    if (videoEl) {
-      const dataSrc = videoEl.getAttribute('data-src') || videoEl.dataset.hlsSrc;
-      if (dataSrc && dataSrc.includes('.m3u8')) return dataSrc;
+    // Strategy 3: video/source elements
+    for (const el of document.querySelectorAll('source[src*=".m3u8"], video[src*=".m3u8"]')) {
+      const src = el.src || el.getAttribute('src');
+      if (src) return src;
     }
 
     return null;
@@ -382,78 +399,74 @@
     document.querySelectorAll('.cfd-post-dl-btn').forEach(el => el.remove());
 
     const tryInject = () => {
-      // Find the video player wrapper: walk up from <video> to find
-      // a container that's a good insertion sibling
       const videoEl = document.querySelector('video');
       if (!videoEl) return false;
 
-      // Walk up to find a reasonable outer container (e.g. the sticky wrapper or aspect-video div)
-      let insertTarget = null;
-      let el = videoEl;
-      while (el && el !== document.body) {
-        // Look for the outermost video wrapper before the main content
-        if (el.classList.contains('sticky') || el.className.includes('aspect-video')) {
-          insertTarget = el;
-        }
-        el = el.parentElement;
-      }
+      const videoWrapper = videoEl.closest('[class*="aspect-video"]');
+      if (!videoWrapper) return false;
 
-      // Fallback: use the closest reasonable container
-      if (!insertTarget) {
-        insertTarget = videoEl.closest('[class*="aspect"]') || videoEl.closest('[class*="sticky"]') || videoEl.parentElement?.parentElement?.parentElement;
-      }
-      if (!insertTarget) return false;
+      // Find the bottom control bar, then the right-side group with fullscreen button
+      const controlBar = videoWrapper.querySelector('.flex.items-center.justify-between');
+      const rightGroup = controlBar?.lastElementChild;
+      const fsBtn = rightGroup?.querySelector('button');
+
+      // Determine injection target
+      const injectTarget = rightGroup && fsBtn ? 'controls' : 'fallback';
 
       // Don't double-inject
-      if (insertTarget.parentElement?.querySelector('.cfd-post-dl-btn')) return true;
+      if (document.querySelector('.cfd-post-dl-btn')) return true;
 
       const btn = document.createElement('button');
       btn.className = 'cfd-post-dl-btn';
-      btn.innerHTML = `${DL_ICON_SVG} Download this video`;
+      btn.style.pointerEvents = 'auto';
+      btn.title = 'Download this video';
+      btn.innerHTML = DL_ICON_SVG;
+      btn.dataset.status = '';
 
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (btn.disabled) return;
         btn.disabled = true;
-        btn.innerHTML = `${DL_ICON_SVG} Fetching...`;
+        btn.dataset.status = 'Fetching URL...';
 
         try {
           const m3u8Url = findM3U8FromPage();
-
           if (!m3u8Url) {
-            btn.innerHTML = `${DL_ICON_SVG} URL not found`;
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = `${DL_ICON_SVG} Download this video`; }, 3000);
+            btn.dataset.status = 'URL not found';
+            setTimeout(() => { btn.disabled = false; btn.dataset.status = ''; }, 3000);
             return;
           }
 
-          // Build a clean title from page title, stripping the CF prefix and site name
           const rawTitle = document.title
             .replace(/^CF\d+\s*/, '')
             .replace(/\s*\|.*$/, '')
             .replace(/[\\/:*?"<>|]/g, '_')
             .substring(0, 80) || `post_${postId}`;
-          const video = { post_id: postId, title: rawTitle, url: m3u8Url };
 
-          btn.innerHTML = `${DL_ICON_SVG} Downloading...`;
-          await downloadHLS(video,
-            (cls, msg) => { btn.innerHTML = `${DL_ICON_SVG} ${msg}`; },
+          await downloadHLS(
+            { post_id: postId, title: rawTitle, url: m3u8Url },
+            (cls, msg) => { btn.dataset.status = msg; },
             { aborted: false }
           );
-          btn.innerHTML = `${DL_ICON_SVG} Done!`;
+          btn.dataset.status = 'Done!';
         } catch (e) {
-          btn.innerHTML = `${DL_ICON_SVG} Error: ${e.message.substring(0, 20)}`;
+          btn.dataset.status = 'Error: ' + e.message.substring(0, 20);
         } finally {
-          setTimeout(() => {
-            btn.disabled = false;
-            btn.innerHTML = `${DL_ICON_SVG} Download this video`;
-          }, 5000);
+          setTimeout(() => { btn.disabled = false; btn.dataset.status = ''; }, 5000);
         }
       });
 
-      // Insert AFTER the video container
-      insertTarget.parentElement.insertBefore(btn, insertTarget.nextSibling);
+      if (injectTarget === 'controls') {
+        rightGroup.insertBefore(btn, fsBtn);
+      } else {
+        btn.style.margin = '8px';
+        btn.style.padding = '8px 16px';
+        btn.style.borderRadius = '8px';
+        videoWrapper.parentElement.insertBefore(btn, videoWrapper.nextSibling);
+      }
       return true;
     };
 
-    // Try immediately, then observe for SPA content loading
     if (!tryInject()) {
       const observer = new MutationObserver(() => {
         if (tryInject()) observer.disconnect();
