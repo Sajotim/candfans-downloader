@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Candfans Downloader
 // @namespace    https://github.com/candfans-downloader
-// @version      2.0.0
+// @version      2.1.0
 // @description  One-click scan & download videos from Candfans creators you subscribe to. Zero external dependencies.
 // @author       candfans-downloader
 // @match        https://candfans.jp/*
@@ -58,7 +58,7 @@
     .cfd-btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
     .cfd-btn-green { background: #22c55e; color: #fff; }
     .cfd-btn-outline { background: transparent; border: 1px solid #45475a; color: #cdd6f4; }
-    .cfd-btn-sm { padding: 5px 10px; font-size: 11px; width: auto; }
+    .cfd-btn-sm { padding: 5px 10px; font-size: 11px; width: auto; border-radius: 6px; }
 
     #cfd-progress-wrap {
       width: 100%; height: 6px; background: #313244; border-radius: 3px;
@@ -77,17 +77,34 @@
     .cfd-divider { border: none; border-top: 1px solid #313244; margin: 10px 0; }
 
     #cfd-video-list {
-      max-height: 200px; overflow-y: auto; margin-top: 8px;
+      max-height: 250px; overflow-y: auto; margin-top: 8px;
       border: 1px solid #313244; border-radius: 8px; font-size: 11px;
     }
     #cfd-video-list table { width: 100%; border-collapse: collapse; }
     #cfd-video-list th { position: sticky; top: 0; background: #313244; padding: 4px 6px; text-align: left; color: #a6adc8; }
     #cfd-video-list td { padding: 4px 6px; border-top: 1px solid #1e1e2e; }
     #cfd-video-list tr:hover { background: #313244; }
+    #cfd-video-list input[type=checkbox] { accent-color: #6366f1; cursor: pointer; }
     .cfd-dl-status { font-size: 10px; }
     .cfd-dl-status.ok { color: #22c55e; }
     .cfd-dl-status.err { color: #f38ba8; }
     .cfd-dl-status.busy { color: #fab387; }
+
+    .cfd-select-bar { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+    .cfd-select-bar span { font-size: 11px; color: #a6adc8; margin-left: auto; }
+
+    /* Single post download button */
+    .cfd-post-dl-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 6px 14px; border-radius: 8px; border: none;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: opacity .15s;
+      margin: 8px 0;
+    }
+    .cfd-post-dl-btn:hover { opacity: .85; }
+    .cfd-post-dl-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .cfd-post-dl-btn svg { width: 14px; height: 14px; }
   `;
 
   // ── State ──
@@ -95,18 +112,25 @@
   let results = {};
   let downloading = false;
   let abortController = null;
+  let selectedIndices = new Set();
 
   // ── Helpers ──
+  const RESERVED_ROUTES = ['explore', 'search', 'settings', 'notifications', 'messages', 'mypage', 'login', 'register', 'ranking', 'posts', 'help', 'terms', 'privacy', 'law', 'inquiry'];
+
   function getUserCodeFromURL() {
     const m = location.pathname.match(/^\/([^/?#]+)/);
     if (!m) return null;
     const code = m[1];
-    const reserved = ['explore', 'search', 'settings', 'notifications', 'messages', 'mypage', 'login', 'register', 'ranking'];
-    return reserved.includes(code) ? null : code;
+    return RESERVED_ROUTES.includes(code) ? null : code;
   }
 
   function getURLParam(key) {
     return new URLSearchParams(location.search).get(key);
+  }
+
+  function getSinglePostId() {
+    const m = location.pathname.match(/\/posts\/comment\/show\/(\d+)/);
+    return m ? m[1] : null;
   }
 
   function sanitizeFilename(name) {
@@ -129,6 +153,28 @@
     const resp = await fetch(`https://candfans.jp/api${path}`, { credentials: 'include' });
     if (!resp.ok) throw new Error(`API ${resp.status}: ${path}`);
     return resp.json();
+  }
+
+  const DL_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
+  // ── SPA URL Change Observer ──
+  function observeURLChanges(callback) {
+    let lastUrl = location.href;
+    const check = () => {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        callback();
+      }
+    };
+    for (const method of ['pushState', 'replaceState']) {
+      const orig = history[method];
+      history[method] = function () {
+        const result = orig.apply(this, arguments);
+        check();
+        return result;
+      };
+    }
+    window.addEventListener('popstate', check);
   }
 
   // ── Core: Scan ──
@@ -190,10 +236,11 @@
   }
 
   // ── Export: URL list (TSV) ──
-  function generateTSV(data) {
+  function generateTSV(data, indices) {
     const videos = data.items.filter(i => i.type === 'video');
+    const selected = indices ? videos.filter((_, i) => indices.has(i)) : videos;
     const header = 'post_id\tduration_sec\ttitle\turl';
-    const rows = videos.map(v => `${v.post_id}\t${Math.round(v.duration)}\t${v.title}\t${v.url}`);
+    const rows = selected.map(v => `${v.post_id}\t${Math.round(v.duration)}\t${v.title}\t${v.url}`);
     return [header, ...rows].join('\n');
   }
 
@@ -215,10 +262,8 @@
     const text = await resp.text();
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-    // Check if this is a master playlist (contains variant streams)
     const variantLine = lines.find(l => l.startsWith('#EXT-X-STREAM-INF'));
     if (variantLine) {
-      // Pick the highest bandwidth variant
       let bestUrl = null;
       let bestBw = 0;
       for (let i = 0; i < lines.length; i++) {
@@ -237,7 +282,6 @@
       }
     }
 
-    // Media playlist: collect .ts segment URLs
     const segments = [];
     for (const line of lines) {
       if (!line.startsWith('#')) {
@@ -255,7 +299,6 @@
     const segments = await parseM3U8(url);
     const total = segments.length;
     const chunks = [];
-    let downloaded = 0;
     let totalBytes = 0;
 
     for (let i = 0; i < total; i++) {
@@ -268,7 +311,6 @@
       const buf = await resp.arrayBuffer();
       chunks.push(buf);
       totalBytes += buf.byteLength;
-      downloaded++;
     }
 
     onStatus('busy', `Merging ${formatBytes(totalBytes)}...`);
@@ -279,33 +321,157 @@
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // Delay revoke to allow download to start
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 
     onStatus('ok', `Done (${formatBytes(totalBytes)})`);
   }
 
-  async function downloadAllHLS(videos, updateRow, onGlobalStatus) {
+  async function downloadAllHLS(videos, indices, updateRow, onGlobalStatus) {
     downloading = true;
     abortController = new AbortController();
     const signal = abortController.signal;
+    const selected = indices ? [...indices].sort((a, b) => a - b) : videos.map((_, i) => i);
+    let done = 0;
 
-    for (let i = 0; i < videos.length; i++) {
+    for (const idx of selected) {
       if (signal.aborted) break;
-      onGlobalStatus(`Downloading ${i + 1}/${videos.length}...`);
+      done++;
+      onGlobalStatus(`Downloading ${done}/${selected.length}...`);
       try {
-        await downloadHLS(videos[i], (cls, msg) => updateRow(i, cls, msg), signal);
+        await downloadHLS(videos[idx], (cls, msg) => updateRow(idx, cls, msg), signal);
       } catch (e) {
-        updateRow(i, 'err', e.message.substring(0, 30));
+        updateRow(idx, 'err', e.message.substring(0, 30));
       }
-      // Small delay between downloads to not overwhelm browser
-      if (i < videos.length - 1 && !signal.aborted) {
+      if (done < selected.length && !signal.aborted) {
         await new Promise(r => setTimeout(r, 500));
       }
     }
 
     downloading = false;
     onGlobalStatus(signal.aborted ? 'Download cancelled.' : 'All downloads complete!');
+  }
+
+  // ── Single Post Download ──
+  function injectSinglePostButton() {
+    const postId = getSinglePostId();
+    if (!postId) return;
+
+    // Remove any previously injected button
+    document.querySelectorAll('.cfd-post-dl-btn').forEach(el => el.remove());
+
+    const tryInject = () => {
+      // Look for video player area on the page
+      const videoEl = document.querySelector('video');
+      const playerContainer = videoEl ? videoEl.closest('div') : null;
+
+      // Also try to find the post content area
+      const postArea = playerContainer || document.querySelector('[class*="post"]') || document.querySelector('main');
+      if (!postArea) return false;
+
+      // Check if button already exists
+      if (postArea.querySelector('.cfd-post-dl-btn')) return true;
+
+      const btn = document.createElement('button');
+      btn.className = 'cfd-post-dl-btn';
+      btn.innerHTML = `${DL_ICON_SVG} Download this video`;
+
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.innerHTML = `${DL_ICON_SVG} Fetching...`;
+
+        try {
+          // Try to get m3u8 URL from video element first
+          let m3u8Url = null;
+
+          // Check video src or source elements
+          if (videoEl) {
+            const src = videoEl.src || videoEl.querySelector('source')?.src || '';
+            if (src.includes('.m3u8')) m3u8Url = src;
+          }
+
+          // If not found in DOM, try HLS.js instance
+          if (!m3u8Url && videoEl) {
+            // HLS.js stores url in its instance, try to find it
+            const hlsUrl = videoEl.getAttribute('data-src') || videoEl.dataset.hlsSrc;
+            if (hlsUrl && hlsUrl.includes('.m3u8')) m3u8Url = hlsUrl;
+          }
+
+          // Fallback: look for m3u8 URL in any script or source on the page
+          if (!m3u8Url) {
+            const allSources = document.querySelectorAll('source[src*=".m3u8"], video[src*=".m3u8"]');
+            for (const el of allSources) {
+              const src = el.src || el.getAttribute('src');
+              if (src) { m3u8Url = src; break; }
+            }
+          }
+
+          // Fallback: search page HTML for m3u8 URLs
+          if (!m3u8Url) {
+            const match = document.body.innerHTML.match(/https?:\/\/video\.candfans\.jp\/[^"'\s]+\.m3u8/);
+            if (match) m3u8Url = match[0];
+          }
+
+          if (!m3u8Url) {
+            btn.innerHTML = `${DL_ICON_SVG} URL not found - try from panel`;
+            btn.disabled = false;
+            return;
+          }
+
+          const title = document.title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 80) || `post_${postId}`;
+          const video = { post_id: postId, title, url: m3u8Url };
+
+          btn.innerHTML = `${DL_ICON_SVG} Downloading...`;
+          await downloadHLS(video,
+            (cls, msg) => { btn.innerHTML = `${DL_ICON_SVG} ${msg}`; },
+            { aborted: false }
+          );
+          btn.innerHTML = `${DL_ICON_SVG} Done!`;
+        } catch (e) {
+          btn.innerHTML = `${DL_ICON_SVG} Error: ${e.message.substring(0, 20)}`;
+        } finally {
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = `${DL_ICON_SVG} Download this video`;
+          }, 3000);
+        }
+      });
+
+      // Insert before or after the video player
+      if (playerContainer && playerContainer.parentNode) {
+        playerContainer.parentNode.insertBefore(btn, playerContainer.nextSibling);
+      } else {
+        postArea.prepend(btn);
+      }
+      return true;
+    };
+
+    // Try immediately, then observe for SPA content loading
+    if (!tryInject()) {
+      const observer = new MutationObserver(() => {
+        if (tryInject()) observer.disconnect();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      // Stop observing after 15s
+      setTimeout(() => observer.disconnect(), 15000);
+    }
+  }
+
+  // ── Selection helpers ──
+  function updateSelectionCount(panel, videos) {
+    const counter = panel.querySelector('#cfd-sel-count');
+    if (counter) counter.textContent = `${selectedIndices.size}/${videos.length} selected`;
+  }
+
+  function setAllCheckboxes(panel, videos, checked) {
+    selectedIndices.clear();
+    if (checked) videos.forEach((_, i) => selectedIndices.add(i));
+    panel.querySelectorAll('#cfd-video-list input[type=checkbox]').forEach((cb, i) => {
+      if (i === 0) return; // skip header "select all"
+    });
+    panel.querySelectorAll('.cfd-row-cb').forEach((cb, i) => { cb.checked = checked; });
+    const masterCb = panel.querySelector('#cfd-select-all');
+    if (masterCb) masterCb.checked = checked;
+    updateSelectionCount(panel, videos);
   }
 
   // ── UI ──
@@ -367,12 +533,18 @@
 
       <div class="cfd-export-group" id="cfd-exports">
         <hr class="cfd-divider"/>
+        <div class="cfd-select-bar" id="cfd-select-bar">
+          <button class="cfd-btn cfd-btn-outline cfd-btn-sm" id="cfd-sel-all">All</button>
+          <button class="cfd-btn cfd-btn-outline cfd-btn-sm" id="cfd-sel-none">None</button>
+          <button class="cfd-btn cfd-btn-outline cfd-btn-sm" id="cfd-sel-invert">Invert</button>
+          <span id="cfd-sel-count"></span>
+        </div>
+        <div id="cfd-video-list"></div>
         <div class="cfd-row">
-          <button class="cfd-btn cfd-btn-primary" id="cfd-dl-browser">Download in browser</button>
+          <button class="cfd-btn cfd-btn-primary" id="cfd-dl-browser">Download selected</button>
           <button class="cfd-btn cfd-btn-outline" id="cfd-dl-stop" style="display:none;">Stop</button>
         </div>
-        <button class="cfd-btn cfd-btn-outline" id="cfd-dl-tsv">Export URL list (.tsv)</button>
-        <div id="cfd-video-list"></div>
+        <button class="cfd-btn cfd-btn-outline" id="cfd-dl-tsv">Export selected (.tsv)</button>
       </div>
     `;
     document.body.appendChild(panel);
@@ -390,6 +562,19 @@
 
     fab.addEventListener('click', () => panel.classList.toggle('open'));
 
+    // ── SPA URL observer ──
+    observeURLChanges(() => {
+      const newCode = getUserCodeFromURL();
+      const newPlan = getURLParam('postPlanId') || '';
+      const $user = panel.querySelector('#cfd-user');
+      const $plan = panel.querySelector('#cfd-plan');
+      if (newCode && $user) $user.value = newCode;
+      if ($plan) $plan.value = newPlan;
+
+      // Handle single post pages
+      injectSinglePostButton();
+    });
+
     // ── Scan ──
     $scan.addEventListener('click', async () => {
       if (scanning) return;
@@ -402,6 +587,7 @@
       $stats.textContent = '';
       $videoList.innerHTML = '';
       results = {};
+      selectedIndices.clear();
 
       const userCodeInput = panel.querySelector('#cfd-user').value.trim();
       if (!userCodeInput) {
@@ -435,15 +621,63 @@
         $status.textContent = 'Scan complete!';
         $stats.innerHTML = `<b>${data.username}</b> &mdash; ${videos.length} videos (${formatDuration(totalDur)})`;
 
-        // Build video list table
+        // Build video list table with checkboxes
         if (videos.length > 0) {
-          let html = '<table><thead><tr><th>#</th><th>Title</th><th>Duration</th><th>Status</th></tr></thead><tbody>';
+          // Select all by default
+          videos.forEach((_, i) => selectedIndices.add(i));
+
+          let html = '<table><thead><tr>';
+          html += '<th><input type="checkbox" id="cfd-select-all" checked /></th>';
+          html += '<th>#</th><th>Title</th><th>Duration</th><th>Status</th>';
+          html += '</tr></thead><tbody>';
           videos.forEach((v, i) => {
-            html += `<tr id="cfd-row-${i}"><td>${i + 1}</td><td title="${v.title}">${v.title.substring(0, 35)}${v.title.length > 35 ? '...' : ''}</td><td>${formatDuration(v.duration)}</td><td class="cfd-dl-status" id="cfd-st-${i}">-</td></tr>`;
+            html += `<tr id="cfd-row-${i}">`;
+            html += `<td><input type="checkbox" class="cfd-row-cb" data-idx="${i}" checked /></td>`;
+            html += `<td>${i + 1}</td>`;
+            html += `<td title="${v.title}">${v.title.substring(0, 30)}${v.title.length > 30 ? '...' : ''}</td>`;
+            html += `<td>${formatDuration(v.duration)}</td>`;
+            html += `<td class="cfd-dl-status" id="cfd-st-${i}">-</td>`;
+            html += '</tr>';
           });
           html += '</tbody></table>';
           $videoList.innerHTML = html;
+
+          // Master checkbox
+          panel.querySelector('#cfd-select-all').addEventListener('change', (e) => {
+            setAllCheckboxes(panel, videos, e.target.checked);
+          });
+
+          // Individual checkboxes
+          panel.querySelectorAll('.cfd-row-cb').forEach(cb => {
+            cb.addEventListener('change', (e) => {
+              const idx = parseInt(e.target.dataset.idx);
+              if (e.target.checked) selectedIndices.add(idx);
+              else selectedIndices.delete(idx);
+              // Update master checkbox
+              const master = panel.querySelector('#cfd-select-all');
+              if (master) master.checked = selectedIndices.size === videos.length;
+              updateSelectionCount(panel, videos);
+            });
+          });
+
+          updateSelectionCount(panel, videos);
           $exports.classList.add('show');
+
+          // Selection toolbar events
+          panel.querySelector('#cfd-sel-all').onclick = () => setAllCheckboxes(panel, videos, true);
+          panel.querySelector('#cfd-sel-none').onclick = () => setAllCheckboxes(panel, videos, false);
+          panel.querySelector('#cfd-sel-invert').onclick = () => {
+            videos.forEach((_, i) => {
+              if (selectedIndices.has(i)) selectedIndices.delete(i);
+              else selectedIndices.add(i);
+            });
+            panel.querySelectorAll('.cfd-row-cb').forEach((cb, i) => {
+              cb.checked = selectedIndices.has(i);
+            });
+            const master = panel.querySelector('#cfd-select-all');
+            if (master) master.checked = selectedIndices.size === videos.length;
+            updateSelectionCount(panel, videos);
+          };
         }
       } catch (err) {
         $status.textContent = `Error: ${err.message}`;
@@ -455,28 +689,28 @@
       }
     });
 
-    // ── Export TSV ──
+    // ── Export TSV (selected only) ──
     panel.querySelector('#cfd-dl-tsv').addEventListener('click', () => {
       if (!results.items) return;
-      const tsv = generateTSV(results);
+      const tsv = generateTSV(results, selectedIndices.size > 0 ? selectedIndices : null);
       triggerDownloadFile(tsv, `candfans_${results.username}_urls.tsv`);
     });
 
-    // ── Download in browser ──
+    // ── Download in browser (selected only) ──
     $dlBrowser.addEventListener('click', async () => {
       if (!results.items || downloading) return;
       const videos = results.items.filter(i => i.type === 'video');
-      if (!videos.length) return;
+      if (!videos.length || selectedIndices.size === 0) return;
 
       $dlBrowser.style.display = 'none';
       $dlStop.style.display = 'block';
 
       await downloadAllHLS(
         videos,
+        selectedIndices,
         (idx, cls, msg) => {
           const el = panel.querySelector(`#cfd-st-${idx}`);
           if (el) { el.className = `cfd-dl-status ${cls}`; el.textContent = msg; }
-          // Auto-scroll to current
           const row = panel.querySelector(`#cfd-row-${idx}`);
           if (row) row.scrollIntoView({ block: 'nearest' });
         },
@@ -491,6 +725,9 @@
     $dlStop.addEventListener('click', () => {
       if (abortController) abortController.abort();
     });
+
+    // ── Initial single post check ──
+    injectSinglePostButton();
   }
 
   // ── Bootstrap ──
