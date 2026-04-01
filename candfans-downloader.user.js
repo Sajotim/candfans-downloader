@@ -352,6 +352,28 @@
   }
 
   // ── Single Post Download ──
+  function findM3U8FromPage() {
+    // Strategy 1: search page HTML for video.candfans.jp m3u8 URLs
+    const match = document.body.innerHTML.match(/https?:\/\/video\.candfans\.jp\/[^"'\s<>]+\.m3u8/);
+    if (match) return match[0];
+
+    // Strategy 2: check video/source elements
+    const allSources = document.querySelectorAll('source[src*=".m3u8"], video[src*=".m3u8"]');
+    for (const el of allSources) {
+      const src = el.src || el.getAttribute('src');
+      if (src) return src;
+    }
+
+    // Strategy 3: check data attributes on video elements
+    const videoEl = document.querySelector('video');
+    if (videoEl) {
+      const dataSrc = videoEl.getAttribute('data-src') || videoEl.dataset.hlsSrc;
+      if (dataSrc && dataSrc.includes('.m3u8')) return dataSrc;
+    }
+
+    return null;
+  }
+
   function injectSinglePostButton() {
     const postId = getSinglePostId();
     if (!postId) return;
@@ -360,16 +382,30 @@
     document.querySelectorAll('.cfd-post-dl-btn').forEach(el => el.remove());
 
     const tryInject = () => {
-      // Look for video player area on the page
+      // Find the video player wrapper: walk up from <video> to find
+      // a container that's a good insertion sibling
       const videoEl = document.querySelector('video');
-      const playerContainer = videoEl ? videoEl.closest('div') : null;
+      if (!videoEl) return false;
 
-      // Also try to find the post content area
-      const postArea = playerContainer || document.querySelector('[class*="post"]') || document.querySelector('main');
-      if (!postArea) return false;
+      // Walk up to find a reasonable outer container (e.g. the sticky wrapper or aspect-video div)
+      let insertTarget = null;
+      let el = videoEl;
+      while (el && el !== document.body) {
+        // Look for the outermost video wrapper before the main content
+        if (el.classList.contains('sticky') || el.className.includes('aspect-video')) {
+          insertTarget = el;
+        }
+        el = el.parentElement;
+      }
 
-      // Check if button already exists
-      if (postArea.querySelector('.cfd-post-dl-btn')) return true;
+      // Fallback: use the closest reasonable container
+      if (!insertTarget) {
+        insertTarget = videoEl.closest('[class*="aspect"]') || videoEl.closest('[class*="sticky"]') || videoEl.parentElement?.parentElement?.parentElement;
+      }
+      if (!insertTarget) return false;
+
+      // Don't double-inject
+      if (insertTarget.parentElement?.querySelector('.cfd-post-dl-btn')) return true;
 
       const btn = document.createElement('button');
       btn.className = 'cfd-post-dl-btn';
@@ -380,45 +416,21 @@
         btn.innerHTML = `${DL_ICON_SVG} Fetching...`;
 
         try {
-          // Try to get m3u8 URL from video element first
-          let m3u8Url = null;
-
-          // Check video src or source elements
-          if (videoEl) {
-            const src = videoEl.src || videoEl.querySelector('source')?.src || '';
-            if (src.includes('.m3u8')) m3u8Url = src;
-          }
-
-          // If not found in DOM, try HLS.js instance
-          if (!m3u8Url && videoEl) {
-            // HLS.js stores url in its instance, try to find it
-            const hlsUrl = videoEl.getAttribute('data-src') || videoEl.dataset.hlsSrc;
-            if (hlsUrl && hlsUrl.includes('.m3u8')) m3u8Url = hlsUrl;
-          }
-
-          // Fallback: look for m3u8 URL in any script or source on the page
-          if (!m3u8Url) {
-            const allSources = document.querySelectorAll('source[src*=".m3u8"], video[src*=".m3u8"]');
-            for (const el of allSources) {
-              const src = el.src || el.getAttribute('src');
-              if (src) { m3u8Url = src; break; }
-            }
-          }
-
-          // Fallback: search page HTML for m3u8 URLs
-          if (!m3u8Url) {
-            const match = document.body.innerHTML.match(/https?:\/\/video\.candfans\.jp\/[^"'\s]+\.m3u8/);
-            if (match) m3u8Url = match[0];
-          }
+          const m3u8Url = findM3U8FromPage();
 
           if (!m3u8Url) {
-            btn.innerHTML = `${DL_ICON_SVG} URL not found - try from panel`;
-            btn.disabled = false;
+            btn.innerHTML = `${DL_ICON_SVG} URL not found`;
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = `${DL_ICON_SVG} Download this video`; }, 3000);
             return;
           }
 
-          const title = document.title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 80) || `post_${postId}`;
-          const video = { post_id: postId, title, url: m3u8Url };
+          // Build a clean title from page title, stripping the CF prefix and site name
+          const rawTitle = document.title
+            .replace(/^CF\d+\s*/, '')
+            .replace(/\s*\|.*$/, '')
+            .replace(/[\\/:*?"<>|]/g, '_')
+            .substring(0, 80) || `post_${postId}`;
+          const video = { post_id: postId, title: rawTitle, url: m3u8Url };
 
           btn.innerHTML = `${DL_ICON_SVG} Downloading...`;
           await downloadHLS(video,
@@ -432,16 +444,12 @@
           setTimeout(() => {
             btn.disabled = false;
             btn.innerHTML = `${DL_ICON_SVG} Download this video`;
-          }, 3000);
+          }, 5000);
         }
       });
 
-      // Insert before or after the video player
-      if (playerContainer && playerContainer.parentNode) {
-        playerContainer.parentNode.insertBefore(btn, playerContainer.nextSibling);
-      } else {
-        postArea.prepend(btn);
-      }
+      // Insert AFTER the video container
+      insertTarget.parentElement.insertBefore(btn, insertTarget.nextSibling);
       return true;
     };
 
@@ -451,7 +459,6 @@
         if (tryInject()) observer.disconnect();
       });
       observer.observe(document.body, { childList: true, subtree: true });
-      // Stop observing after 15s
       setTimeout(() => observer.disconnect(), 15000);
     }
   }
