@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Candfans Downloader
 // @namespace    https://github.com/candfans-downloader
-// @version      2.1.1
-// @description  One-click scan & download videos from Candfans creators you subscribe to. Zero external dependencies.
+// @version      2.2.0
+// @description  One-click scan & download videos from Candfans creators you subscribe to.
 // @author       candfans-downloader
 // @match        https://candfans.jp/*
 // @license      MIT
 // @grant        none
+// @require      https://cdn.jsdelivr.net/npm/mux.js@7.0.3/dist/mux.min.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -300,6 +301,38 @@
     return segments;
   }
 
+  function transmuxTsToMp4(tsData) {
+    return new Promise((resolve, reject) => {
+      try {
+        const transmuxer = new muxjs.mp4.Transmuxer({ remux: true });
+        const outputSegments = [];
+
+        transmuxer.on('data', (segment) => {
+          const initSeg = new Uint8Array(segment.initSegment.byteLength + segment.data.byteLength);
+          initSeg.set(segment.initSegment, 0);
+          initSeg.set(segment.data, segment.initSegment.byteLength);
+          outputSegments.push(initSeg);
+        });
+
+        transmuxer.on('done', () => {
+          const totalLen = outputSegments.reduce((s, seg) => s + seg.byteLength, 0);
+          const result = new Uint8Array(totalLen);
+          let offset = 0;
+          for (const seg of outputSegments) {
+            result.set(seg, offset);
+            offset += seg.byteLength;
+          }
+          resolve(result);
+        });
+
+        transmuxer.push(tsData);
+        transmuxer.flush();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
   async function downloadHLS(video, onStatus, signal) {
     const { post_id, title, url } = video;
     const filename = `${post_id}_${title}.mp4`;
@@ -322,8 +355,30 @@
       totalBytes += buf.byteLength;
     }
 
-    onStatus('busy', `Merging ${formatBytes(totalBytes)}...`);
-    const blob = new Blob(chunks, { type: 'video/mp2t' });
+    onStatus('busy', `Remuxing ${formatBytes(totalBytes)} to MP4...`);
+
+    // Merge all TS chunks into one buffer
+    const tsBuffer = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      tsBuffer.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+
+    // Transmux TS → fragmented MP4
+    let blob;
+    if (typeof muxjs !== 'undefined') {
+      try {
+        const mp4Data = await transmuxTsToMp4(tsBuffer);
+        blob = new Blob([mp4Data], { type: 'video/mp4' });
+      } catch (e) {
+        console.warn('[Candfans DL] Transmux failed, falling back to raw TS:', e);
+        blob = new Blob(chunks, { type: 'video/mp2t' });
+      }
+    } else {
+      blob = new Blob(chunks, { type: 'video/mp2t' });
+    }
+
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -332,7 +387,7 @@
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 
-    onStatus('ok', `Done (${formatBytes(totalBytes)})`);
+    onStatus('ok', `Done (${formatBytes(blob.size)})`);
   }
 
   async function downloadAllHLS(videos, indices, updateRow, onGlobalStatus) {
